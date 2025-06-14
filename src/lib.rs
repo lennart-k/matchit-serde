@@ -48,7 +48,7 @@ pub mod macros {
 }
 
 #[derive(Debug, Clone)]
-pub struct Params<'de>(&'de [(&'de str, &'de str)]);
+pub struct Params<'de>(pub &'de [(&'de str, &'de str)]);
 
 impl<'de> Params<'de> {
     fn len(&self) -> usize {
