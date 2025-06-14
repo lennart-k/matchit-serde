@@ -2,7 +2,7 @@ use serde::de::{
     self, Visitor,
     value::{MapDeserializer, SeqDeserializer},
 };
-use std::any::type_name;
+use std::{any::type_name, borrow::Cow, str::Utf8Error};
 use thiserror::Error;
 
 pub mod macros {
@@ -32,7 +32,7 @@ pub mod macros {
                     });
                 }
 
-                let value = self.0.0[0].1;
+                let value = &self.0.0[0].1;
                 let value = value
                     .parse()
                     .map_err(|_| ParamsDeserializationError::ParseError {
@@ -48,19 +48,32 @@ pub mod macros {
 }
 
 #[derive(Debug, Clone)]
-pub struct Params<'de>(pub &'de [(&'de str, &'de str)]);
+pub struct Params<'de>(Vec<(&'de str, Cow<'de, str>)>);
+
+impl<'de> TryFrom<&'de matchit::Params<'de, 'de>> for Params<'de> {
+    type Error = ParamsDeserializationError;
+
+    fn try_from(params: &'de matchit::Params) -> Result<Self, ParamsDeserializationError> {
+        Ok(Self(
+            params
+                .iter()
+                .map(|(k, v)| Ok((k, percent_encoding::percent_decode_str(v).decode_utf8()?)))
+                .collect::<Result<Vec<_>, Utf8Error>>()?,
+        ))
+    }
+}
 
 impl<'de> Params<'de> {
     fn len(&self) -> usize {
         self.0.len()
     }
 
-    fn iter_entries(&self) -> impl Iterator<Item = (&'de str, &'de str)> {
-        self.0.iter().map(|&(k, v)| (k, v))
+    fn iter_entries(&'de self) -> impl Iterator<Item = (&'de str, &'de str)> {
+        self.0.iter().map(|(k, v)| (*k, v.as_ref()))
     }
 
-    fn values(&self) -> impl Iterator<Item = &'de str> {
-        self.0.iter().map(|&(_k, v)| v)
+    fn values(&'de self) -> impl Iterator<Item = &'de str> {
+        self.0.iter().map(|(_k, v)| v.as_ref())
     }
 }
 
@@ -90,6 +103,9 @@ pub enum ParamsDeserializationError {
         value: String,
         expected_type: &'static str,
     },
+
+    #[error(transparent)]
+    Utf8Error(#[from] Utf8Error),
 }
 
 impl ParamsDeserializationError {
@@ -254,9 +270,7 @@ mod tests {
         router.insert("/{principal}/{path}", ()).unwrap();
         let Match { params, .. } = router.at("/user/interesting").unwrap();
 
-        let params: Vec<(&str, &str)> = params.iter().collect();
-        let params = Params(params.as_slice());
-
+        let params = Params::try_from(&params).unwrap();
         let deserializer = ParamsDeserializer::new(params);
 
         #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -276,5 +290,17 @@ mod tests {
 
         let path = <(String, String)>::deserialize(&deserializer).unwrap();
         assert_eq!(path, ("user".to_owned(), "interesting".to_owned()));
+    }
+
+    #[test]
+    fn test_urldecode() {
+        let mut router = matchit::Router::new();
+        router.insert("/{principal}/{path}", ()).unwrap();
+        let Match { params, .. } = router.at("/user/%28interesting%29").unwrap();
+
+        let params = Params::try_from(&params).unwrap();
+        let deserializer = ParamsDeserializer::new(params);
+        let path = <(String, String)>::deserialize(&deserializer).unwrap();
+        assert_eq!(path, ("user".to_owned(), "(interesting)".to_owned()));
     }
 }
